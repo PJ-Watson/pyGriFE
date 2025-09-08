@@ -931,6 +931,7 @@ def regen_multiband_catalogue(
     out_dir=None,
     seg_out_path=None,
     filt_auto_quantities=False,
+    use_photutils=False,
 ):
     """
     Generate a catalogue and run aperture photometry on all objects.

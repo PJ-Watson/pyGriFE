@@ -41,7 +41,7 @@ def init_from_input_multispec(self, flt, beam, conf=None, get_slice_header=True)
     if conf is None:
         conf = grismconf.load_grism_config(flt.conf_file)
 
-    print(f"Reached here, key={self.id}")
+    # print(f"Reached here, key={self.id}")
     self.beam = model.GrismDisperser(
         id=beam.id,
         direct=beam.direct * 1,
@@ -73,7 +73,7 @@ def init_from_input_multispec(self, flt, beam, conf=None, get_slice_header=True)
         hasattr(beam, "old_obj_ids")
         and len(np.atleast_1d(beam.old_obj_ids).flatten()) > 0
     ):
-        print(beam.old_obj_ids)
+        # print(beam.old_obj_ids)
         seg_copy = deepcopy(beam.seg)
         beam.seg = deepcopy(flt.orig_seg[sly_thumb, slx_thumb])
         beam.seg[seg_copy != self.id] = 0
@@ -707,7 +707,7 @@ def mod_compute_model_orders(
         xcat = ycat = None
         if self.catalog is not None:
             ix = self.catalog["id"] == id
-            print(len(self.catalog))
+            # print(len(self.catalog))
             if ix.sum() == 0:
                 if verbose:
                     print(f"ID {id} not found in segmentation image")
