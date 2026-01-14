@@ -392,8 +392,9 @@ def load_and_mod_FLT(
         fp = open(save_file.replace("GrismFLT.fits", "GrismFLT.pkl"), "rb")
         flt = pickle.load(fp)
         fp.close()
-
-        flt.conf_file = f"{os.environ['GRIZLI']}/CONF/{flt.conf_file.split('/')[-1]}"
+        
+        # print ("FLT.conf_file", flt.conf_file)
+        # flt.conf_file = f"{os.environ['GRIZLI']}/CONF/{flt.conf_file.split('/')[-1]}"
 
         status = flt.load_from_fits(save_file)
 

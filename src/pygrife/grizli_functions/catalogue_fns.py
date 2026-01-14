@@ -318,7 +318,7 @@ def make_SEP_catalog(
 
     # with pf.open(drz_file) as drz_im:
     drz_im = pf.open(drz_file)
-    data = drz_im[0].data.byteswap().newbyteorder()
+    data = drz_im[0].data.view(drz_im[0].data.dtype.newbyteorder()).byteswap()
 
     logstr = f"make_SEP_catalog: {drz_file} weight={weight_file} ({WEIGHT_TYPE})"
     utils.log_comment(utils.LOGFILE, logstr, verbose=verbose, show_date=True)
@@ -355,7 +355,7 @@ def make_SEP_catalog(
     need_err = (not use_bkg_err) | (not get_background)
     if (weight_file is not None) & need_err:
         wht_im = pf.open(weight_file)
-        wht_data = wht_im[0].data.byteswap().newbyteorder()
+        wht_data = wht_im[0].data.view(wht_im[0].data.dtype.newbyteorder()).byteswap()
 
         if WEIGHT_TYPE == "VARIANCE":
             err_data = np.sqrt(wht_data)

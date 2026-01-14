@@ -638,6 +638,8 @@ class GrismExtractor:
         spectrum: str = "full",
         max_chinu: int | float = 5,
         fit_files: list[str] | list[os.PathLike] | None = None,
+        mag_limit=25,
+        get_beams=None
     ) -> bool:
         """
         Refine existing contamination models.
@@ -687,8 +689,8 @@ class GrismExtractor:
 
                 sp = utils.GTable(hdu["TEMPL"].data)
 
-                wave = np.cast[float](sp["wave"])  # .byteswap()
-                flux = np.cast[float](sp[spectrum])  # .byteswap()
+                wave = np.asarray(sp["wave"], dtype=float)  # .byteswap()
+                flux = np.asarray(sp[spectrum], dtype=float)  # .byteswap()
                 for flt in self.grp.FLTs:
                     if int(o_id) not in flt.object_dispersers:
                         old_obj_ids = np.unique(flt.orig_seg[flt.seg == o_id])
@@ -697,12 +699,12 @@ class GrismExtractor:
                         ].astype(int)
                 self.grp.compute_single_model(
                     int(o_id),
-                    mag=19,
+                    mag=mag_limit,
                     size=-1,
                     store=False,
                     spectrum_1d=[wave, flux],
                     is_cgs=True,
-                    get_beams=None,
+                    get_beams=get_beams,
                     in_place=True,
                 )
                 print("Refine model ({0}/{1}): {2}".format(i, N, file))
