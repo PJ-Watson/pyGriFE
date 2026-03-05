@@ -135,7 +135,7 @@ class ExtractorGUI(SegMapViewer):
         if self.new_dir_path is not None:
             out_dir_path = Path(self.new_dir_path)
         elif self.new_dir_name is not None:
-            out_dir_path = Path(self.input_dir.parent) / self.new_dir_name
+            out_dir_path = Path(self.in_dir.parent) / self.new_dir_name
         else:
             raise NameError(
                 "Either the path or name of the output directory must be supplied."
@@ -163,7 +163,7 @@ class ExtractorGUI(SegMapViewer):
         if self.ge is None:
             self.ge = GrismExtractor(
                 field_root=self.field_root,
-                in_dir=self.input_dir,
+                in_dir=self.in_dir,
                 out_dir=out_dir_path,
             )
         self.ge.load_seg_img(self.seg_data[::-1, :])
@@ -180,18 +180,18 @@ class GrizliFilesWindow(FilesWindow):
     def __init__(self, root):
         super().__init__(root)
 
-        self.input_dir_line = LineBrowse(
-            parent=self, is_dir=True, root_name="input_dir"
+        self.in_dir_line = LineBrowse(
+            parent=self, is_dir=True, root_name="in_dir"
         )
-        self.sub_layout.insertRow(0, "Input Directory", self.input_dir_line)
+        self.sub_layout.insertRow(0, "Input Directory", self.in_dir_line)
 
     def select_from_directory(self, event=None):
-        if self.input_dir_line.line.text() is not (None or ""):
-            self._load_from_dir(self.input_dir_line.line.text())
+        if self.in_dir_line.line.text() is not (None or ""):
+            self._load_from_dir(self.in_dir_line.line.text())
             return
 
-        if self.root.input_dir is not None:
-            init = str(self.root.input_dir)
+        if self.root.in_dir is not None:
+            init = str(self.root.in_dir)
         elif self.recent_dir is not None:
             init = str(self.recent_dir)
         else:
@@ -201,15 +201,14 @@ class GrizliFilesWindow(FilesWindow):
 
         if dir_name:
             self._load_from_dir(dir_name)
-            self.input_dir_line.line.setText(str(dir_name))
+            self.in_dir_line.line.setText(str(dir_name))
 
     def _load_from_dir(self, dir_name):
         super()._load_from_dir(dir_name)
-        self.input_dir_line.line.setText(str(dir_name))
+        self.in_dir_line.line.setText(str(dir_name))
 
 
 def run_GUI(name: str = "extractor", **kwargs):
-
     if name.lower() == "extractor":
         GUI = ExtractorGUI
     elif name.lower() == "viewer":

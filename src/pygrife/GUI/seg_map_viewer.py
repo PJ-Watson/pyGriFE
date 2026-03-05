@@ -76,7 +76,7 @@ class SegMapViewer(QMainWindow):
         self.layout_side = QVBoxLayout(self.left_toolbar)
         self.layout_side.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        self.input_dir = None
+        self.in_dir = None
         self.seg_img_path = None
         self.stack_img_path = None
         self.r_img_path = None
@@ -382,10 +382,12 @@ class SegMapViewer(QMainWindow):
 
     def load_from_dir(self):
 
-        if self.input_dir is not None:
-            test_dir = Path(self.input_dir)
+        if self.in_dir is not None:
+            test_dir = Path(self.in_dir)
         else:
             test_dir = Path.home()
+
+        print (test_dir)
 
         if self.seg_img_path is None:
             try:
@@ -402,7 +404,7 @@ class SegMapViewer(QMainWindow):
             try:
                 stack_img = [
                     *test_dir.glob(
-                        f"{self.field_root}-{self.detection_filter}_drz_sci.fits"
+                        f"{self.field_root}-{self.detection_filter}_dr[zc]_sci.fits"
                     )
                 ][0]
                 self.stack_img_path = stack_img
@@ -430,7 +432,7 @@ class SegMapViewer(QMainWindow):
     def load_image(
         self,
         progress_callback=None,
-        # input_dir: str | os.PathLike | None = None,
+        # in_dir: str | os.PathLike | None = None,
         # seg_img_path: str | os.PathLike | None = None,
         # r_img_path: str | os.PathLike | None = None,
         # g_img_path: str | os.PathLike | None = None,
@@ -439,8 +441,8 @@ class SegMapViewer(QMainWindow):
     ):
         progress_callback.emit(10, "Locating files...")
 
-        if "input_dir" in kwargs:
-            self.test_path("input_dir", kwargs.pop("input_dir"), is_dir=True)
+        if "in_dir" in kwargs:
+            self.test_path("in_dir", kwargs.pop("in_dir"), is_dir=True)
         for k, v in kwargs.items():
             self.test_path(k, v, is_dir=False)
 
@@ -733,8 +735,8 @@ class FilesWindow(QWidget):
         self.setMinimumWidth(540)
 
     def select_from_directory(self, event=None):
-        if self.root.input_dir is not None:
-            init = str(self.root.input_dir)
+        if self.root.in_dir is not None:
+            init = str(self.root.in_dir)
         elif self.recent_dir is not None:
             init = str(self.recent_dir)
         else:
@@ -746,7 +748,7 @@ class FilesWindow(QWidget):
             self._load_from_dir(dir_name)
 
     def _load_from_dir(self, dir_name):
-        self.root.input_dir = Path(dir_name)
+        self.root.in_dir = Path(dir_name)
         seg, stack, b, g, r = self.root.load_from_dir()
         if seg is not None:
             self.seg_line.line.setText(str(seg))
@@ -764,7 +766,7 @@ class FilesWindow(QWidget):
         self.progress_label.setHidden(False)
         worker = Worker(
             self.root.load_image,
-            input_dir=self.root.input_dir,
+            in_dir=self.root.in_dir,
             seg_img_path=self.seg_line.line.text(),
             r_img_path=self.r_line.line.text(),
             g_img_path=self.g_line.line.text(),

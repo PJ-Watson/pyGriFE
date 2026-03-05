@@ -2,6 +2,7 @@
 
 import copy
 import glob
+import inspect
 import os
 from pathlib import Path
 
@@ -10,11 +11,8 @@ import astropy.units as u
 import astropy.wcs as pywcs
 import grizli
 import numpy as np
-
-try:
-    import sep_pjw as sep
-except:
-    import sep
+import sep
+from astropy.table import Table
 
 # from grizli import utils, prep, jwst_utils, multifit, fitting
 from grizli import prep, utils
@@ -27,13 +25,14 @@ def make_SEP_catalog(
     root="",
     sci=None,
     wht=None,
-    threshold=1.8,
+    threshold=2.0,
     get_background=True,
     bkg_only=False,
     bkg_params={"bw": 32, "bh": 32, "fw": 3, "fh": 3},
     verbose=True,
     phot_apertures=prep.SEXTRACTOR_PHOT_APERTURES,
     aper_segmask=False,
+    prefer_var_image=True,
     rescale_weight=True,
     err_scale=-np.inf,
     use_bkg_err=False,
@@ -59,6 +58,8 @@ def make_SEP_catalog(
     in_dir=None,
     out_dir=None,
     seg_out_path=None,
+    detect_cat=None,
+    use_photutils=False,
     **kwargs,
 ):
     """
@@ -73,8 +74,7 @@ def make_SEP_catalog(
       writing the output to another.
     - Add ``seg_out_path`` parameter, so that the name of the
       segmentation map output can be specified.
-    - Add ``seg_image`` parameter. Using a fork of SEP
-      (``sep >= 1.3.0``, https://github.com/PJ-Watson/sep), passing an
+    - Add ``seg_image`` parameter. Using ``sep>=1.4.0``, passing an
       array here allows one to bypass the object detection, and
       instead derive all the catalogue quantities for the specified
       objects.
@@ -129,6 +129,9 @@ def make_SEP_catalog(
         If true, then run SEP photometry with segmentation masking.  This
         requires the sep fork at https://github.com/gbrammer/sep.git,
         or ``sep >= 1.10.0``.
+
+    prefer_var_image : bool
+        Use a variance image ``_wht.fits > _var.fits`` if found.
 
     rescale_weight : bool
         If true, then a scale factor is calculated from the ratio of the
@@ -217,8 +220,9 @@ def make_SEP_catalog(
     seg_image : ndarray, optional
         A 2D array of the segmentation map. Each unique value in the array
         should correspond to the pixels associated with a specific object.
-        Requires ``sep >= 1.3.0``. If not supplied, this will be generated
-        instead using the SEP implementation of SourceExtractor.
+        Requires ``sep >= 1.3.0``, or ``photutils``. If not supplied,
+        this will be generated instead using the SEP implementation of
+        SourceExtractor.
 
     in_dir : str or os.PathLike, optional
         The directory containing the necessary input files (e.g. drizzled
@@ -233,6 +237,17 @@ def make_SEP_catalog(
     seg_out_path : str or os.PathLike, optional
         The name or path to which the segmentation map will be saved.
 
+    detect_cat : `~astropy.table.Table`, optional
+        If not ``None``, this will be used to calculate Kron/auto-like
+        quantities if ``compute_auto_quantities==True``. This allows a
+        different morphological catalogue to be used for detection and
+        photometry.
+
+    use_photutils : bool, optional
+        If ``True``, and ``seg_image!=None``, measurements will be made
+        using ``photutils.segmentation.SourceCatalog`` instead of SEP.
+        By default ``False``.
+
     **kwargs : dict, optional
         Included in the original function, but seemingly not used.
 
@@ -242,10 +257,11 @@ def make_SEP_catalog(
         Source catalog.
     """
 
-    # if log:
-    #     frame = inspect.currentframe()
-    #     utils.log_function_arguments(utils.LOGFILE, frame,
-    #                                 'prep.make_SEP_catalog', verbose=True)
+    if log:
+        frame = inspect.currentframe()
+        utils.log_function_arguments(
+            utils.LOGFILE, frame, "prep.make_SEP_catalog", verbose=True
+        )
 
     sep.set_extract_pixstack(extract_pixstack)
     sep.set_sub_object_limit(sub_object_limit)
@@ -276,8 +292,8 @@ def make_SEP_catalog(
         # Get AB zeropoint
         ZP = utils.calc_header_zeropoint(im, ext=0)
 
-        # logstr = 'sep: Image AB zeropoint =  {0:.3f}'.format(ZP)
-        # utils.log_comment(utils.LOGFILE, logstr, verbose=verbose, show_date=True)
+        logstr = "sep: Image AB zeropoint =  {0:.3f}".format(ZP)
+        utils.log_comment(utils.LOGFILE, logstr, verbose=verbose, show_date=True)
 
         # Scale fluxes to mico-Jy
         uJy_to_dn = 1 / (3631 * 1e6 * 10 ** (-0.4 * ZP))
@@ -294,65 +310,82 @@ def make_SEP_catalog(
     else:
         WEIGHT_TYPE = "MAP_WEIGHT"
 
-    with pf.open(drz_file) as drz_im:
-        # drz_im = pf.open(drz_file)
-        data = drz_im[0].data.byteswap().newbyteorder()
+    if (WEIGHT_TYPE == "MAP_WEIGHT") & (prefer_var_image):
+        var_file = weight_file.replace("wht.fits", "var.fits")
+        if os.path.exists(var_file) & (var_file != weight_file):
+            weight_file = var_file
+            WEIGHT_TYPE = "VARIANCE"
 
-        try:
-            wcs = pywcs.WCS(drz_im[0].header)
-            wcs_header = utils.to_header(wcs)
-            pixel_scale = utils.get_wcs_pscale(wcs)  # arcsec
-        except:
-            wcs = None
-            wcs_header = drz_im[0].header.copy()
-            pixel_scale = np.sqrt(wcs_header["CD1_1"] ** 2 + wcs_header["CD1_2"] ** 2)
-            pixel_scale *= 3600.0  # arcsec
+    # with pf.open(drz_file) as drz_im:
+    drz_im = pf.open(drz_file)
+    data = drz_im[0].data.view(drz_im[0].data.dtype.newbyteorder()).byteswap()
 
-        # Add some header keywords to the wcs header
-        for k in ["EXPSTART", "EXPEND", "EXPTIME"]:
-            if k in drz_im[0].header:
-                wcs_header[k] = drz_im[0].header[k]
+    logstr = f"make_SEP_catalog: {drz_file} weight={weight_file} ({WEIGHT_TYPE})"
+    utils.log_comment(utils.LOGFILE, logstr, verbose=verbose, show_date=True)
 
-        if isinstance(phot_apertures, str):
-            apertures = np.cast[float](phot_apertures.replace(",", "").split())
-        else:
-            apertures = []
-            for ap in phot_apertures:
-                if hasattr(ap, "unit"):
-                    apertures.append(ap.to(u.arcsec).value / pixel_scale)
-                else:
-                    apertures.append(ap)
-
-        # Do we need to compute the error from the wht image?
-        need_err = (not use_bkg_err) | (not get_background)
-        if (weight_file is not None) & need_err:
-            wht_im = pf.open(weight_file)
-            wht_data = wht_im[0].data.byteswap().newbyteorder()
-
-            err = 1 / np.sqrt(wht_data)
-            del wht_data
-
-            # True mask pixels are masked with sep
-            mask = (~np.isfinite(err)) | (err == 0) | (~np.isfinite(data))
-            err[mask] = 0
-
-            wht_im.close()
-            del wht_im
-
-        else:
-            # True mask pixels are masked with sep
-            mask = (data == 0) | (~np.isfinite(data))
-            err = None
+    logstr = "make_SEP_catalog: Image AB zeropoint =  {0:.3f}".format(ZP)
+    utils.log_comment(utils.LOGFILE, logstr, verbose=verbose, show_date=False)
 
     try:
-        # drz_im.close()
+        wcs = pywcs.WCS(drz_im[0].header)
+        wcs_header = utils.to_header(wcs)
+        pixel_scale = utils.get_wcs_pscale(wcs)  # arcsec
+    except:
+        wcs = None
+        wcs_header = drz_im[0].header.copy()
+        pixel_scale = np.sqrt(wcs_header["CD1_1"] ** 2 + wcs_header["CD1_2"] ** 2)
+        pixel_scale *= 3600.0  # arcsec
+
+    # Add some header keywords to the wcs header
+    for k in ["EXPSTART", "EXPEND", "EXPTIME"]:
+        if k in drz_im[0].header:
+            wcs_header[k] = drz_im[0].header[k]
+
+    if isinstance(phot_apertures, str):
+        apertures = np.asarray(phot_apertures.replace(",", "").split(), dtype=float)
+    else:
+        apertures = []
+        for ap in phot_apertures:
+            if hasattr(ap, "unit"):
+                apertures.append(ap.to(u.arcsec).value / pixel_scale)
+            else:
+                apertures.append(ap)
+
+    # Do we need to compute the error from the wht image?
+    need_err = (not use_bkg_err) | (not get_background)
+    if (weight_file is not None) & need_err:
+        wht_im = pf.open(weight_file)
+        wht_data = wht_im[0].data.view(wht_im[0].data.dtype.newbyteorder()).byteswap()
+
+        if WEIGHT_TYPE == "VARIANCE":
+            err_data = np.sqrt(wht_data)
+        else:
+            err_data = 1 / np.sqrt(wht_data)
+
+        del wht_data
+
+        # True mask pixels are masked with sep
+        mask = (~np.isfinite(err_data)) | (err_data == 0) | (~np.isfinite(data))
+        err_data[mask] = 0
+
+        wht_im.close()
+        del wht_im
+
+    else:
+        # True mask pixels are masked with sep
+        mask = (data == 0) | (~np.isfinite(data))
+        err_data = None
+
+    try:
+        drz_im.close()
         del drz_im
     except:
         pass
 
-    data_mask = np.cast[data.dtype](mask)
+    data_mask = np.asarray(mask, dtype=data.dtype)
 
     if get_background | (err_scale < 0) | (use_bkg_err):
+
         # Account for pixel scale in bkg_params
         bkg_input = {}
         if "pixel_scale" in bkg_params:
@@ -385,7 +418,7 @@ def make_SEP_catalog(
             if in_dir is not None and in_dir.is_dir():
                 bkg_file = str(in_dir / f"{root}_bkg.fits")
             else:
-                bkg_file = "{root}_bkg.fits"
+                bkg_file = f"{root}_bkg.fits"
             if os.path.exists(bkg_file):
                 logstr = "SEP: use background file {0}".format(bkg_file)
                 utils.log_comment(
@@ -398,19 +431,19 @@ def make_SEP_catalog(
         #     pf.writeto('{0}_bkg.fits'.format(root), data=bkg_data,
         #             header=wcs_header, overwrite=True)
 
-        if (err is None) | use_bkg_err:
+        if (err_data is None) | use_bkg_err:
             logstr = "sep: Use bkg.rms() for error array"
             utils.log_comment(utils.LOGFILE, logstr, verbose=verbose, show_date=True)
 
-            err = bkg.rms()
+            err_data = bkg.rms()
 
         if err_scale == -np.inf:
-            ratio = bkg.rms() / err
+            ratio = bkg.rms() / err_data
             err_scale = np.median(ratio[(~mask) & np.isfinite(ratio)])
         else:
             # Just return the error scale
             if err_scale < 0:
-                ratio = bkg.rms() / err
+                ratio = bkg.rms() / err_data
                 xerr_scale = np.median(ratio[(~mask) & np.isfinite(ratio)])
                 del bkg
                 return xerr_scale
@@ -431,25 +464,107 @@ def make_SEP_catalog(
         if verbose:
             print("SEP: err_scale={:.3f}".format(err_scale))
 
-        err *= err_scale
+        err_data *= err_scale
 
     if source_xy is None:
         # Run the detection
         if verbose:
-            print("SEP: Extract...")
+            print("   SEP: Extract...")
 
-        objects, seg = sep.extract(
-            data_bkg,
-            threshold,
-            err=err,
-            mask=mask,
-            segmentation_map=seg_image if seg_image is not None else True,
-            **detection_params,
-        )
+        if seg_image is None:
+            objects, seg = sep.extract(
+                data_bkg,
+                threshold,
+                err=err_data,
+                mask=mask,
+                segmentation_map=True,
+                **detection_params,
+            )
+
+            objects = Table(objects)
+
+            objects["number"] = np.arange(len(objects), dtype=np.int32) + 1
+
+        elif use_photutils:
+
+            from photutils.segmentation import SegmentationImage, SourceCatalog
+
+            seg_img = SegmentationImage(seg_image)
+
+            if detection_params.get("filter_kernel", None) is not None:
+                from astropy.convolution import convolve
+
+                conv_data = convolve(data_bkg, detection_params["filter_kernel"])
+            else:
+                conv_data = data_bkg
+
+            source_cat = SourceCatalog(
+                data=data_bkg,
+                segment_img=seg_img,
+                convolved_data=conv_data,
+                error=err_data,
+                mask=mask,
+            )
+
+            rename_cols = {
+                "label": "number",
+                "area": "npix",
+                "bbox_xmin": "xmin",
+                "bbox_xmax": "xmax",
+                "bbox_ymin": "ymin",
+                "bbox_ymax": "ymax",
+                "xcentroid": "x",
+                "ycentroid": "y",
+                "covar_sigx2": "x2",
+                "covar_sigy2": "y2",
+                "covar_sigxy": "xy",
+                "semimajor_sigma": "a",
+                "semiminor_sigma": "b",
+                "orientation": "theta",
+                "cxx": "cxx",
+                "cyy": "cyy",
+                "cxy": "cxy",
+                "segment_flux": "flux",
+                "max_value": "peak",
+                "maxval_xindex": "xpeak",
+                "maxval_yindex": "ypeak",
+            }
+            remove_cols = [
+                "skycentroid",
+            ]
+
+            objects = Table()
+            for orig_phot, sex_name in rename_cols.items():
+                objects[sex_name] = getattr(source_cat, orig_phot)
+
+            extra_cnames = {
+                "segment_flux": "cflux",
+                "max_value": "cpeak",
+                "maxval_xindex": "xcpeak",
+                "maxval_yindex": "ycpeak",
+            }
+            for orig_phot, sex_name in extra_cnames.items():
+                objects[sex_name] = getattr(source_cat, orig_phot)
+
+            objects["theta"] = np.deg2rad(objects["theta"])
+            seg = seg_image
+
+        else:
+            objects, seg = sep.extract(
+                data_bkg,
+                threshold,
+                err=err_data,
+                mask=mask,
+                segmentation_map=seg_image,
+                **detection_params,
+            )
+
+            objects = Table(objects)
+            ids = np.unique(seg_image)
+            objects["number"] = ids[ids > 0]
 
         if verbose:
-            print("\033[1A", end="\x1b[2K")
-            print("SEP: Extract... Done.")
+            print("    Done.")
 
         tab = utils.GTable(objects)
         tab.meta["VERSION"] = (sep.__version__, "SEP version")
@@ -465,9 +580,16 @@ def make_SEP_catalog(
             tab["number"] = ids[ids > 0]
 
         tab["theta"] = np.clip(tab["theta"], -np.pi / 2, np.pi / 2)
+
+        test_cols = ["number", "a", "b", "x", "y", "x_image", "y_image", "theta"]
+        for row in tab:
+            # print (np.array([*row[test_cols]]))
+            if not np.isfinite(np.array([*row[test_cols]])).all():
+                print(row[test_cols])
+        # print (len(tab))
         for c in ["a", "b", "x", "y", "x_image", "y_image", "theta"]:
             tab = tab[np.isfinite(tab[c])]
-
+        # exit()
         if seg_image is None:
             seg_image = seg
 
@@ -534,59 +656,13 @@ def make_SEP_catalog(
 
         # ISO fluxes (flux within segments)
         iso_flux, iso_fluxerr, iso_area = prep.get_seg_iso_flux(
-            data_bkg, seg, tab, err=err, verbose=1
+            data_bkg, seg, tab, err=err_data, verbose=1
         )
 
         tab["flux_iso"] = iso_flux / uJy_to_dn * u.uJy
         tab["fluxerr_iso"] = iso_fluxerr / uJy_to_dn * u.uJy
         tab["area_iso"] = iso_area
         tab["mag_iso"] = 23.9 - 2.5 * np.log10(tab["flux_iso"])
-
-        # Compute FLUX_AUTO, FLUX_RADIUS
-        if compute_auto_quantities:
-            auto = prep.compute_SEP_auto_params(
-                data,
-                data_bkg,
-                mask,
-                pixel_scale=pixel_scale,
-                err=err,
-                segmap=seg,
-                tab=tab,
-                autoparams=autoparams,
-                flux_radii=flux_radii,
-                subpix=subpix,
-                verbose=verbose,
-            )
-
-            for k in auto.meta:
-                tab.meta[k] = auto.meta[k]
-
-            auto_flux_cols = ["flux_auto", "fluxerr_auto", "bkg_auto"]
-            for c in auto.colnames:
-                if c in auto_flux_cols:
-                    tab[c] = auto[c] / uJy_to_dn * u.uJy
-                else:
-                    tab[c] = auto[c]
-
-            # Problematic sources
-            # bad = (tab['flux_auto'] <= 0) | (tab['flux_radius'] <= 0)
-            # bad |= (tab['kron_radius'] <= 0)
-            # tab = tab[~bad]
-
-            # Correction for flux outside Kron aperture
-            tot_corr = prep.get_kron_tot_corr(
-                tab, drz_filter, pixel_scale=pixel_scale, photplam=drz_photplam
-            )
-
-            tab["tot_corr"] = tot_corr
-            tab.meta["TOTCFILT"] = (drz_filter, "Filter for tot_corr")
-            tab.meta["TOTCWAVE"] = (drz_photplam, "PLAM for tot_corr")
-
-            total_flux = tab["flux_auto"] * tot_corr
-            tab["mag_auto"] = 23.9 - 2.5 * np.log10(total_flux)
-            tab["magerr_auto"] = (
-                2.5 / np.log(10) * (tab["fluxerr_auto"] / tab["flux_auto"])
-            )
 
         # More flux columns
         for c in ["cflux", "flux", "peak", "cpeak"]:
@@ -605,6 +681,9 @@ def make_SEP_catalog(
         # Rename some columns to look like SExtractor
         for c in ["a", "b", "theta", "cxx", "cxy", "cyy", "x2", "y2", "xy"]:
             tab.rename_column(c, c + "_image")
+
+        if detect_cat is None:
+            detect_cat = tab
 
     else:
         if len(source_xy) == 2:
@@ -659,6 +738,46 @@ def make_SEP_catalog(
 
     tab.meta["APERMASK"] = (aper_segmask, "Mask apertures with seg image")
 
+    # Compute FLUX_AUTO, FLUX_RADIUS
+    if compute_auto_quantities and (detect_cat is not None):
+
+        auto = prep.compute_SEP_auto_params(
+            data,
+            data_bkg,
+            mask,
+            pixel_scale=pixel_scale,
+            err=err_data,
+            segmap=aseg,
+            tab=detect_cat,
+            autoparams=autoparams,
+            flux_radii=flux_radii,
+            subpix=subpix,
+            verbose=verbose,
+        )
+
+        for k in auto.meta:
+            tab.meta[k] = auto.meta[k]
+
+        auto_flux_cols = ["flux_auto", "fluxerr_auto", "bkg_auto"]
+        for c in auto.colnames:
+            if c in auto_flux_cols:
+                tab[c] = auto[c] / uJy_to_dn * u.uJy
+            else:
+                tab[c] = auto[c]
+
+        # Correction for flux outside Kron aperture
+        tot_corr = prep.get_kron_tot_corr(
+            tab, drz_filter, pixel_scale=pixel_scale, photplam=drz_photplam
+        )
+
+        tab["tot_corr"] = tot_corr
+        tab.meta["TOTCFILT"] = (drz_filter, "Filter for tot_corr")
+        tab.meta["TOTCWAVE"] = (drz_photplam, "PLAM for tot_corr")
+
+        total_flux = tab["flux_auto"] * tot_corr
+        tab["mag_auto"] = 23.9 - 2.5 * np.log10(total_flux)
+        tab["magerr_auto"] = 2.5 / np.log(10) * (tab["fluxerr_auto"] / tab["flux_auto"])
+
     # Photometry
     for iap, aper in enumerate(apertures):
         if sep.__version__ > "1.03":
@@ -668,7 +787,7 @@ def make_SEP_catalog(
                 source_x,
                 source_y,
                 aper / 2,
-                err=err,
+                err=err_data,
                 gain=gain,
                 subpix=subpix,
                 segmap=aseg,
@@ -682,7 +801,7 @@ def make_SEP_catalog(
                 source_x,
                 source_y,
                 aper / 2,
-                err=err,
+                err=err_data,
                 gain=gain,
                 subpix=subpix,
                 mask=mask,
@@ -724,7 +843,13 @@ def make_SEP_catalog(
 
         # Count masked pixels in the aperture, not including segmask
         flux, fluxerr, flag = sep.sum_circle(
-            data_mask, source_x, source_y, aper / 2, err=err, gain=gain, subpix=subpix
+            data_mask,
+            source_x,
+            source_y,
+            aper / 2,
+            err=err_data,
+            gain=gain,
+            subpix=subpix,
         )
 
         tab["mask_aper_{0}".format(iap)] = flux
@@ -735,32 +860,11 @@ def make_SEP_catalog(
             "Aperture diameter, arcsec",
         )
 
-    # # If blended, use largest aperture magnitude
-    # if 'flag' in tab.colnames:
-    #     last_flux = tab['flux_aper_{0}'.format(iap)]
-    #     last_fluxerr = tab['fluxerr_aper_{0}'.format(iap)]
-    #
-    #     blended = (tab['flag'] & 1) > 0
-    #
-    #     total_corr = tab['flux_auto']/last_flux
-    #     blended |= total_corr > max_total_corr
-    #
-    #     tab['flag'][blended] |= 1024
-    #
-    #     aper_mag = 23.9 - 2.5*np.log10(last_flux)
-    #     aper_magerr = 2.5/np.log(10)*last_fluxerr/last_flux
-    #
-    #     tab['mag_auto'][blended] = aper_mag[blended]
-    #     tab['magerr_auto'][blended] = aper_magerr[blended]
-    #
-    #     # "ISO" mag, integrated within the segment
-    #     tab['mag_iso'] = 23.9-2.5*np.log10(tab['flux'])
-
     try:
         # Free memory objects explicitly
         del data_mask
         del data
-        del err
+        del err_data
     except:
         pass
 
@@ -791,8 +895,8 @@ def make_SEP_catalog(
             except:
                 pass
 
-    # logstr = '# SEP {0}.cat.fits: {1:d} objects'.format(root, len(tab))
-    # utils.log_comment(utils.LOGFILE, logstr, verbose=verbose)
+    logstr = "# SEP {0}.cat.fits: {1:d} objects".format(root, len(tab))
+    utils.log_comment(utils.LOGFILE, logstr, verbose=verbose)
 
     return tab
 
@@ -821,17 +925,20 @@ def regen_multiband_catalogue(
     aper_segmask=True,
     sci_image=None,
     clean_bkg=True,
+    prefer_var_image=True,
     seg_image=None,
     in_dir=None,
     out_dir=None,
     seg_out_path=None,
+    filt_auto_quantities=False,
+    use_photutils=False,
 ):
     """
     Generate a catalogue and run aperture photometry on all objects.
 
     This function was originally taken from
-    `~grizli.auto_script.multiband_catalog`, and has been modified in the
-    following ways:
+    `~grizli.pipeline.auto_script.multiband_catalog`, and has been
+    modified in the following ways:
 
     - Add ``in_dir`` and ``out_dir`` parameters, so that the
       operations can take place using files from one directory, but
@@ -950,6 +1057,10 @@ def regen_multiband_catalogue(
         If ``True``, then the ``"*bkg.fits"`` files will be removed after
         the catalogue is created.
 
+    prefer_var_image : bool
+        If found, use ``_var.fits`` image for the full variance that includes
+        the Poisson component.
+
     seg_image : ndarray, optional
         A 2D array of the segmentation map. Each unique value in the array
         should correspond to the pixels associated with a specific object.
@@ -969,6 +1080,10 @@ def regen_multiband_catalogue(
     seg_out_path : str or os.PathLike, optional
         The name or path to which the segmentation map will be saved.
 
+    filt_auto_quantities : bool, optional
+        Calculate Kron/auto-like quantities for each filter, in addition
+        to those measured from the detection image. By default ``False``.
+
     Returns
     -------
     `astropy.table.Table`
@@ -977,6 +1092,9 @@ def regen_multiband_catalogue(
         `~grizli.prep.make_SEP_catalog` but with separate photometry
         columns for each multi-wavelength filter image found.
     """
+
+    frame = inspect.currentframe()
+    utils.log_function_arguments(utils.LOGFILE, frame, "auto_script.multiband_catalog")
 
     if in_dir is not None:
         in_dir = Path(in_dir)
@@ -1027,20 +1145,23 @@ def regen_multiband_catalogue(
         bkg_params=bkg_params,
         use_bkg_err=use_bkg_err,
         aper_segmask=aper_segmask,
+        prefer_var_image=prefer_var_image,
         seg_image=seg_image,
         in_dir=in_dir,
         out_dir=out_dir,
         seg_out_path=seg_out_path,
+        use_photutils=use_photutils,
     )
 
     cat_pixel_scale = tab.meta["asec_0"][0] / tab.meta["aper_0"][0]
 
+    # Source positions
     if aper_segmask:
         if seg_out_path is not None:
             seg_data = pf.open(seg_out_path)[0].data
         else:
             seg_data = pf.open(out_dir / f"{detection_root}_seg.fits")[0].data
-        seg_data = np.cast[np.int32](seg_data)
+        seg_data = np.asarray(seg_data, dtype=np.int32)
 
         aseg, aseg_id = seg_data, tab["NUMBER"]
 
@@ -1051,7 +1172,9 @@ def regen_multiband_catalogue(
 
     if filters is None:
         # visits_file = '{0}_visits.yaml'.format(field_root)
-        visits_file = auto_script.find_visit_file(root=field_root, path=str(in_dir))
+        visits_file = auto_script.find_visit_file(
+            root=field_root, path=str(in_dir) if in_dir is not None else "./"
+        )
         if visits_file is None:
             get_all_filters = True
 
@@ -1083,9 +1206,15 @@ def regen_multiband_catalogue(
             # visits, all_groups, info = np.load(vfile, allow_pickle=True)
             visits, all_groups, info = auto_script.load_visit_info(
                 field_root,
-                path=in_dir,
+                path=str(in_dir) if in_dir is not None else "./",
                 verbose=False,
             )
+
+            if ONLY_F814W:
+                info = info[
+                    ((info["INSTRUME"] == "WFC3") & (info["DETECTOR"] == "IR"))
+                    | (info["FILTER"] == "F814W")
+                ]
 
             # UVIS
             info_filters = [f for f in info["FILTER"]]
@@ -1106,6 +1235,13 @@ def regen_multiband_catalogue(
         verbose=True,
     )
 
+    if filt_auto_quantities:
+        detect_cat = tab.copy()
+        detect_cat.rename_columns(
+            detect_cat.colnames, [c.lower() for c in detect_cat.colnames]
+        )
+    else:
+        detect_cat = None
     for ii, filt in enumerate(filters):
         utils.log_comment(
             utils.LOGFILE,
@@ -1165,9 +1301,12 @@ def regen_multiband_catalogue(
                 bkg_params=bkg_params,
                 use_bkg_err=use_bkg_err,
                 sci=sci_image,
+                prefer_var_image=prefer_var_image,
                 seg_image=seg_image,
                 in_dir=in_dir,
                 out_dir=out_dir,
+                detect_cat=detect_cat,
+                use_photutils=use_photutils,
             )
 
             for k in filter_tab.meta:
@@ -1177,22 +1316,13 @@ def regen_multiband_catalogue(
 
             for c in filter_tab.colnames:
                 newc = "{0}_{1}".format(filt.upper(), c)
+                newc = newc.replace("-CLEAR", "")
                 tab[newc] = filter_tab[c]
 
             # Kron total correction from EE
             newk = "{0}_PLAM".format(filt.upper())
             newk = newk.replace("-CLEAR", "")
-            # filt_plam = tab.meta[newk]
-
-            tot_corr = prep.get_kron_tot_corr(
-                tab,
-                filt.lower(),
-                pixel_scale=cat_pixel_scale,
-                # photplam=filt_plam,
-            )
-
-            # ee_corr = prep.get_kron_tot_corr(tab, filter=filt.lower())
-            tab["{0}_tot_corr".format(filt.upper())] = tot_corr
+            filt_plam = tab.meta[newk]
 
             if clean_bkg:
                 # bkg_files = glob.glob(f'{root}*{filt}*bkg.fits')
@@ -1218,7 +1348,7 @@ def regen_multiband_catalogue(
     try:
         out_path = out_dir / f"{output_root}_phot.fits"
     except:
-        out_path = f"{root}_phot.fits"
+        out_path = f"{output_root}_phot.fits"
     tab.write(
         out_path,
         format="fits",

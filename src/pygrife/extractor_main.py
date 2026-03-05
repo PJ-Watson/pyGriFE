@@ -12,6 +12,7 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 from functools import partial
 from importlib.metadata import version
+from packaging.version import Version, parse
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,13 +27,11 @@ from astropy.table import Table
 from astropy.wcs import WCS
 from tqdm import tqdm
 
-if version("sep-pjw").split(".")[1] < "3":
-    warnings.warn(
-        RuntimeWarning(
-            "Modifying the object catalogue requires SEP>=1.3.0. Please install the"
-            " fork maintained at https://github.com/PJ-Watson/sep-pjw."
-        )
-    )
+if parse(version("sep")) < Version("1.4.0"):
+    warnings.warn(RuntimeWarning("Modifying the object catalogue requires SEP>=1.4.0."))
+    HAS_SEP = False
+else:
+    HAS_SEP = True
 
 # grizli_dir = Path(
 #     "/Path/to/out/dir" # Point this to the output directory
@@ -180,7 +179,7 @@ class GrismExtractor:
                         follow_symlinks=True,
                     )
 
-        link_patterns = ["*drz_sci.fits", "*drz_wht.fits"]
+        link_patterns = ["*dr[zc]_sci.fits", "*dr[zc]_wht.fits"]
         for pattern in link_patterns:
             orig_files = self.in_dir.glob(self.field_root + pattern)
             for o in orig_files:
@@ -219,7 +218,12 @@ class GrismExtractor:
         self.seg_name = seg_path.name
 
         with pf.open(seg_path) as hdul:
-            self.seg_map = hdul[ext].data.byteswap().newbyteorder()
+            if parse(version("numpy")) < Version("2.0.0"):
+                self.seg_map = hdul[ext].data.byteswap().newbyteorder()
+            else:
+                self.seg_map = hdul[ext].data.astype(
+                    hdul[ext].data.dtype.newbyteorder("=")
+                )
             self.seg_hdr = hdul[ext].header
             self.seg_wcs = WCS(self.seg_hdr)
 
@@ -239,11 +243,8 @@ class GrismExtractor:
             The multiband catalogue.
         """
 
-        if version("sep-pjw").split(".")[1] < "3":
-            raise ImportError(
-                "Modifying the object catalogue requires SEP>=1.3.0. Please install the"
-                " fork maintained at https://github.com/PJ-Watson/sep-pjw."
-            )
+        if not HAS_SEP:
+            raise ImportError("Modifying the object catalogue requires SEP>=1.4.0.")
 
         utils.log_comment(
             utils.LOGFILE,
@@ -481,6 +482,8 @@ class GrismExtractor:
         multibeam_kwargs: dict[str, Any] | None = None,
         spectrum_1d: npt.ArrayLike | None = None,
         is_cgs: bool = True,
+        trim_sensitivity : bool = False,
+        fit_trace_shift : bool = False
     ) -> None:
         """
         Perform a full extraction of the specified objects.
@@ -509,6 +512,7 @@ class GrismExtractor:
             The flux units of ``spectrum_1d[1]`` are cgs f_lambda flux
             densities, rather than normalised in the detection band, by
             default True.
+        trim_sensitivity : bool, optional
         """
 
         if not hasattr(self, "grp"):
@@ -578,7 +582,44 @@ class GrismExtractor:
             mb = multifit.MultiBeam(
                 beams, group_name=self.field_root, **multibeam_kwargs
             )
+            if fit_trace_shift:
+                mb.fit_trace_shift()
+
+            # print(dir(mb))
+            # print(mb.wavef.shape)
+            # print(mb.scif.shape)
+
+            # print(dir(mb.beams[0]))
+            # print(Path.cwd())
             mb.write_master_fits()
+
+            if trim_sensitivity:
+                (Path.cwd() / f"{self.field_root}_{obj_id:05}.beams.fits").rename(
+                    Path.cwd() / f"{self.field_root}_{obj_id:05}.orig_beams.fits",
+                )
+                for i, b_i in enumerate(mb.beams[:]):
+                    # print (dir(b_i.grism))
+                    # print ((b_i.grism.mdrizsky))
+                    # print ((b_i.grism.pupil))
+                    match b_i.grism.pupil:
+                        case "F115W":
+                            lam_l, lam_h = 10130, 12830
+                        case "F150W":
+                            lam_l, lam_h = 13300, 16710
+                        case "F200W":
+                            lam_l, lam_h = 17510, 22260
+                    waves = b_i.wavef.reshape(b_i.sh)
+                    # mb.beams[i].grism.data["SCI"][(waves < lam_l) | (waves > lam_h)] = 0
+                    mb.beams[i].grism.data["ERR"][(waves < lam_l) | (waves > lam_h)] = 0
+                    # mb.beams[i]
+                    # plt.imshow(b_i.scif.reshape(b_i.sh))
+                    # plt.show()
+                    # scif[
+
+                    # ]
+                    # exit()
+                mb.write_master_fits()
+
             _ = fitting.run_all_parallel(
                 obj_id,
                 zr=z_range,
@@ -597,6 +638,8 @@ class GrismExtractor:
         spectrum: str = "full",
         max_chinu: int | float = 5,
         fit_files: list[str] | list[os.PathLike] | None = None,
+        mag_limit=25,
+        get_beams=None
     ) -> bool:
         """
         Refine existing contamination models.
@@ -646,8 +689,8 @@ class GrismExtractor:
 
                 sp = utils.GTable(hdu["TEMPL"].data)
 
-                wave = np.cast[float](sp["wave"])  # .byteswap()
-                flux = np.cast[float](sp[spectrum])  # .byteswap()
+                wave = np.asarray(sp["wave"], dtype=float)  # .byteswap()
+                flux = np.asarray(sp[spectrum], dtype=float)  # .byteswap()
                 for flt in self.grp.FLTs:
                     if int(o_id) not in flt.object_dispersers:
                         old_obj_ids = np.unique(flt.orig_seg[flt.seg == o_id])
@@ -656,12 +699,12 @@ class GrismExtractor:
                         ].astype(int)
                 self.grp.compute_single_model(
                     int(o_id),
-                    mag=19,
+                    mag=mag_limit,
                     size=-1,
                     store=False,
                     spectrum_1d=[wave, flux],
                     is_cgs=True,
-                    get_beams=None,
+                    get_beams=get_beams,
                     in_place=True,
                 )
                 print("Refine model ({0}/{1}): {2}".format(i, N, file))

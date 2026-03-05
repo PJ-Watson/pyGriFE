@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0","oldest-supported-numpy", "wheel", "Cython", "set
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "PyGriFE"
+name = "pyGriFE"
 dynamic = ["version"]
 authors = [
   { name="Peter Watson", email="peter.watson+pyGFE@inaf.it" },
@@ -18,18 +18,16 @@ classifiers = [
 ]
 dependencies = [
     "astropy>=5.3",
-    "numpy>=1.24",
+    "numpy>=1.26.4",
     "matplotlib>=3.6",
     "tqdm>=4.66",
     "regions>=0.8",
+    "sep>=1.4.0"
 ]
 
 [project.optional-dependencies]
 grizli = [
-    "grizli [jwst] @ git+https://github.com/gbrammer/grizli",
-]
-sep = [
-    "sep-pjw >= 1.3.3"
+    "grizli[jwst]",
 ]
 GUI = [
     "pyqt6>=6.6.0",
@@ -39,19 +37,20 @@ docs = [
     "sphinx-copybutton>=0.5",
     "sphinx>=7.2",
     "numpydoc>=1.6",
-    "furo>=2024.1",
+    # "furo>=2024.1",
+    "sphinx-astropy[confv2]>=1.9.1"
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/PJ-Watson/PyGriFE"
-"Bug Tracker" = "https://github.com/PJ-Watson/PyGriFE/issues"
+"Homepage" = "https://github.com/PJ-Watson/pyGriFE"
+"Bug Tracker" = "https://github.com/PJ-Watson/pyGriFE/issues"
 
 [tool.setuptools.package-data]
 "*" = ["*.*"]
 
 [tool.black]
 line-length = 88
-target-version = ['py311']
+target-version = ['py312']
 extend-exclude = '(.*.txt|.*.md|.*.toml|.*.odg)'
 preview = true
 

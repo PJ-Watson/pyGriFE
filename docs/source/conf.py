@@ -11,7 +11,7 @@ Configuration file for generating documentation with sphinx.
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "PyGriFE"
-copyright = "2024, Peter J. Watson"
+copyright = "2025, Peter J. Watson"
 author = "Peter J. Watson"
 # release = '0.0.3'
 from importlib.metadata import version as get_version
@@ -31,6 +31,14 @@ sys.path.insert(0, os.path.abspath(os.path.join("..", "..", "src")))
 os.environ["GRIZLI"] = ""
 os.environ["iref"] = ""
 os.environ["jref"] = ""
+
+try:
+    from sphinx_astropy.conf.v2 import *
+except ImportError:
+    print(
+        "ERROR: the documentation requires the sphinx-astropy package to be installed."
+    )
+    sys.exit(1)
 
 extensions = [
     "sphinx.ext.autosummary",
@@ -61,9 +69,6 @@ intersphinx_mapping = {
         f"https://docs.python.org/{version_link}",
         None,
     ),  # link to used Python version
-    "numpy": ("https://numpy.org/doc/stable", None),
-    "matplotlib": ("https://matplotlib.org/stable", None),
-    "astropy": ("https://docs.astropy.org/en/stable", None),
     "grizli": ("https://grizli.readthedocs.io/en/latest/", None),
     "PyQt6": ("https://www.riverbankcomputing.com/static/Docs/PyQt6/", None),
 }
@@ -81,8 +86,4 @@ default_role = "autolink"
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
-# html_theme = "pydata_sphinx_theme"
-# html_theme = "alabaster"
-html_theme = "furo"
-# html_theme = "sphinx_rtd_theme"
-html_static_path = ["_static"]
+html_theme = "pydata_sphinx_theme"
